@@ -1,0 +1,3 @@
+[submodule "vendor/browser-agent-recorder"]
+	path = vendor/browser-agent-recorder
+	url = https://github.com/VelvetAbyss/browser-agent-recorder.git

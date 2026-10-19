@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "院内流程助手 · Hospital RPA",
+  "description": "离线录制、变量模板与院内网页任务自动化",
+  "version": "0.2.0",
+  "minimum_chrome_version": "120",
+  "permissions": ["storage", "tabs", "alarms", "clipboardWrite"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "content_scripts": [{ "matches": ["http://*/*", "https://*/*"], "js": ["selector.js", "content.js"], "run_at": "document_idle" }],
+  "action": { "default_title": "打开院内流程工作台" },
+  "options_page": "workbench.html",
+  "externally_connectable": { "matches": ["http://localhost/*", "http://127.0.0.1/*"] },
+  "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none'" }
+}
