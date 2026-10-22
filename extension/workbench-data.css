@@ -1,7 +1,10 @@
 .mapping-list,.task-data-list{display:grid;gap:10px;margin:12px 0}
+.mock-variable-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:0 0 20px}.mock-variable-fields label{display:grid;gap:7px;font-size:12px;color:var(--muted)}.mock-variable-fields input,.mock-variable-fields textarea{width:100%;min-width:0;box-sizing:border-box}@media(max-width:600px){.mock-variable-fields{grid-template-columns:1fr}}
 .mapping-row,.task-data-row{display:grid;grid-template-columns:minmax(220px,1fr) minmax(180px,1fr) auto;gap:10px;align-items:start}
 .mapping-row button,.task-data-row button{white-space:nowrap}
 .task-data-row{grid-template-columns:minmax(120px,.65fr) repeat(auto-fit,minmax(190px,1fr)) auto;padding:12px;border:1px solid var(--line);border-radius:8px;background:#fbfcf8}
+.box .task-data-field{display:grid;gap:6px;align-content:start;margin:0;color:var(--muted);font-size:11px;line-height:1.4}
+.box .task-data-field input,.box .task-data-field textarea{min-width:0;margin:0}
 .task-data-row textarea{min-height:76px;font:12px/1.6 "Microsoft YaHei",sans-serif}
 .mapping-row input,.task-data-row input,.task-data-row textarea{min-width:0}
 @media(max-width:700px){.mapping-row,.task-data-row{grid-template-columns:1fr}.task-data-row button{justify-self:start}}

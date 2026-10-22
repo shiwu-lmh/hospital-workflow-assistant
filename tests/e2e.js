@@ -14,7 +14,7 @@ try {
   context = await chromium.launchPersistentContext(profile, { channel: 'chromium', headless: true, reducedMotion: 'reduce', args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`] });
   const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
   const id = new URL(worker.url()).host;
-  const page = await context.newPage(); await page.goto('http://127.0.0.1:4173/'); await page.waitForLoadState('networkidle');
+  const page = await context.newPage(); await page.goto('http://127.0.0.1:4174/'); await page.waitForLoadState('networkidle');
   const options = await context.newPage(); await options.goto(`chrome-extension://${id}/workbench.html`);
   await options.evaluate(data => chrome.runtime.sendMessage({type:'IMPORT', data}), {version:1, ...seed(true)});
   await options.reload();
@@ -22,7 +22,7 @@ try {
   const errors = []; options.on('pageerror', e => errors.push(e.message)); page.on('pageerror', e => errors.push(e.message));
   const rpc = message => options.evaluate(m => chrome.runtime.sendMessage(m), message);
   const state = async () => (await rpc({ type: 'STATE' })).state;
-  const tabId = await options.evaluate(async () => (await chrome.tabs.query({ url: 'http://127.0.0.1:4173/*' }))[0].id);
+  const tabId = await options.evaluate(async () => (await chrome.tabs.query({ url: 'http://127.0.0.1:4174/*' }))[0].id);
   const waitRun = async () => { for (let i = 0; i < 200; i++) { const s = await state(); if (!s.activeRun) return s.runs[0]; await new Promise(r => setTimeout(r, 100)); } throw new Error('run timeout'); };
   for (const name of ['COD1', 'COD2', 'A1']) {
     assert.equal((await rpc({ type: 'RUN', instanceId: `demo-${name}`, tabId })).ok, true);
@@ -52,7 +52,7 @@ try {
   await rpc({ type: 'RUN', instanceId: personTask.instanceId, tabId });
   assert.equal((await waitRun()).status, 'success');
   assert.match(await page.locator('#result').innerText(), /PERSON_B/);
-  assert.equal((await rpc({ type: 'SETTINGS', settings: { targetOrigins: ['http://127.0.0.1:4173'], externalOrigins: ['http://127.0.0.1:4173'], externalEnabled: true } })).ok, true);
+  assert.equal((await rpc({ type: 'SETTINGS', settings: { targetOrigins: ['http://127.0.0.1:4174'], externalOrigins: ['http://127.0.0.1:4174'], externalEnabled: true } })).ok, true);
   const external = m => page.evaluate(({ id, m }) => chrome.runtime.sendMessage(id, m), { id, m });
   const message = { type: 'RUN', requestId: 'external-e2e-1', templateGroup: 'COD', vars: { searchWord: 'EXTERNAL' } };
   assert.equal((await external(message)).ok, true); assert.equal((await waitRun()).status, 'success');

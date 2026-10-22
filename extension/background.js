@@ -1,4 +1,4 @@
-import { ensure, template, task, resolveSteps, importData, seed, httpUrl, text, variables, MAX_STEPS, DEMO_TASK_BODY } from './core.js';
+import { patientVariableForSelector, ensure, template, task, resolveSteps, resolveSingleStep, importData, seed, httpUrl, text, variables, MAX_STEPS, DEMO_TASK_BODY, DEMO_TASK_BODIES, LEGACY_DEMO_TASK_BODIES, PREVIOUS_DEMO_TASK_BODIES } from './core.js';
 
 // All mutations use one serialized writer; durable activeRun prevents concurrent runs.
 let tail = Promise.resolve();
@@ -9,12 +9,75 @@ const initial = exclusive(async () => {
   await chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
   let state = await get();
   if (!state) state = seed();
+  // Move previously saved mock-HIS workflows to the new local server port.
+  if (!state.demoPort4174Migrated) {
+    const moveDemoUrl = value => {
+      try {
+        const url = new URL(value);
+        if (url.origin === 'http://127.0.0.1:4173') { url.port = '4174'; return url.href; }
+      } catch { /* Keep unrelated or absent URLs as stored. */ }
+      return value;
+    };
+    for (const item of state.templates) {
+      item.startUrl = moveDemoUrl(item.startUrl);
+      for (const step of item.steps) if (step.type === 'navigate') step.url = moveDemoUrl(step.url);
+    }
+    state.settings.targetOrigins = [...new Set(state.settings.targetOrigins.map(origin => moveDemoUrl(origin).replace(/\/$/, '')))];
+    state.demoPort4174Migrated = true;
+  }
+  // Add the expanded fictional inbox once for existing installations; keep all
+  // tasks the user has edited or removed from that point onward untouched.
+  if (!state.demoPatientExpansionAdded) {
+    const defaults = seed();
+    const taskIds = new Set(state.tasks.map(t => t.instanceId));
+    state.tasks.push(...defaults.tasks.filter(t => !taskIds.has(t.instanceId) && Number(t.variables.patientId?.replace('DEMO-', '')) >= 1006));
+    state.demoPatientExpansionAdded = true;
+  }
+  if (!state.demoCodAllPatientsAdded) {
+    const codTemplateId = state.tasks.find(item => state.templates.some(t => t.templateId === item.templateId && t.groupName === 'COD'))?.templateId
+      || state.templates.find(t => t.groupName === 'COD')?.templateId;
+    if (codTemplateId) {
+      const taskIds = new Set(state.tasks.map(item => item.instanceId));
+      state.tasks.push(...seed().tasks.filter(item => /^COD(?:[7-9]|1[0-2])$/.test(item.name) && !taskIds.has(item.instanceId)).map(item => ({ ...item, templateId: codTemplateId })));
+      state.demoCodAllPatientsAdded = true;
+    }
+  }
   // This MVP uses the in-plugin mock inbox only; keep real external messaging off.
   if (state.settings) state.settings.externalEnabled = false;
   // Give existing demo tasks a fictional preloaded source document, without
   // overwriting any task text the user has already edited.
-  for (const sample of state.tasks.filter(t => /^demo-(COD[123]|A[12])$/.test(t.instanceId))) {
-    if (!sample.variables.taskText && !sample.variables.historyText) sample.variables.taskText = DEMO_TASK_BODY;
+  const seededTasks = seed().tasks;
+  for (const sample of state.tasks.filter(t => /^demo-(COD[1-6]|A[1-6])$/.test(t.instanceId))) {
+    const sampleBody = DEMO_TASK_BODIES[sample.name];
+    const savedBodies = [sample.variables.taskText, sample.variables.historyText].filter(Boolean);
+    const priorDefaults = [DEMO_TASK_BODY, LEGACY_DEMO_TASK_BODIES[sample.name], PREVIOUS_DEMO_TASK_BODIES[sample.name]].filter(Boolean);
+    const untouchedExample = (!Object.hasOwn(sample.variables, 'taskText') && !Object.hasOwn(sample.variables, 'historyText')) || (savedBodies.length > 0 && savedBodies.every(body => priorDefaults.includes(body)));
+    if (untouchedExample) {
+      sample.variables.taskText = sampleBody;
+      if (sample.variables.historyText === DEMO_TASK_BODY || sample.variables.historyText === LEGACY_DEMO_TASK_BODIES[sample.name]) delete sample.variables.historyText;
+    }
+    const defaults = seededTasks.find(t => t.instanceId === sample.instanceId);
+    if (defaults) {
+      if (!Object.hasOwn(sample.variables, 'patientName')) sample.variables.patientName = sample.variables.searchWord || defaults.variables.patientName;
+      if (!Object.hasOwn(sample.variables, 'searchWord')) sample.variables.searchWord = sample.variables.patientName || defaults.variables.searchWord;
+      if (!Object.hasOwn(sample.variables, 'patientId')) sample.variables.patientId = defaults.variables.patientId;
+      if (!Object.hasOwn(sample.variables, 'age')) sample.variables.age = defaults.variables.age;
+    }
+  }
+  // Align untouched built-in task demographics with the shared HIS directory.
+  // User-edited names, ages, or search values are left as entered.
+  if (!state.demoTaskPatientsAligned) {
+    for (const defaults of seed().tasks) {
+      const sample = state.tasks.find(t => t.instanceId === defaults.instanceId);
+      if (!sample) continue;
+      const vars = sample.variables;
+      const defaultVars = defaults.variables;
+      const untouchedIdentity = vars.patientName === defaultVars.patientName && vars.searchWord === defaultVars.searchWord && vars.age === defaultVars.age;
+      if (!untouchedIdentity) continue;
+      if (/^DEMO-2\d{3}$/.test(vars.patientId || '')) vars.patientId = defaultVars.patientId;
+      for (const key of ['sex', 'department', 'phone']) if (!Object.hasOwn(vars, key)) vars[key] = defaultVars[key];
+    }
+    state.demoTaskPatientsAligned = true;
   }
   // Repair older floating-panel recordings that created a new template ID,
   // leaving the built-in group tasks attached to their empty starter template.
@@ -41,6 +104,7 @@ const initial = exclusive(async () => {
   if (state.activeRun) {
     const run = state.runs.find(r => r.id === state.activeRun);
     if (run) { run.status = 'interrupted'; run.error = '后台重启，执行结果需人工核对后重新发起'; run.finishedAt = Date.now(); }
+    if (state.groupRun?.status === 'running') Object.assign(state.groupRun, { status: 'interrupted', error: '后台重启，未自动继续批量任务', finishedAt: Date.now() });
     state.activeRun = null;
   }
   await put(state);
@@ -59,6 +123,13 @@ chrome.tabs.onRemoved.addListener(tabId => exclusive(async () => {
 }));
 
 function allowed(state, url) { return state.settings.targetOrigins.includes(httpUrl(url).origin); }
+function taskVariables(task, template) {
+  const vars = { ...task.variables };
+  const declared = new Set([...(template?.bindings || []).map(binding => binding.variable), ...(template?.steps || []).flatMap(step => !step.disabled && ['input', 'select'].includes(step.type) ? [...String(step.value || '').matchAll(/\{([A-Za-z_]\w*)\}/g)].map(match => match[1]) : [])]);
+  if (declared.has('searchWord') && !vars.searchWord && vars.patientName) vars.searchWord = vars.patientName;
+  if (declared.has('patientName') && !vars.patientName && vars.searchWord) vars.patientName = vars.searchWord;
+  return vars;
+}
 async function selectedTab(id) {
   if (Number.isInteger(id)) return chrome.tabs.get(id);
   return (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
@@ -70,10 +141,11 @@ async function beginRun(state, request, tabId) {
     if (previous) return { runId: previous.id, duplicate: true };
   }
   ensure(!state.activeRun && !state.recording, '已有任务或录制正在进行');
+  if (!request.groupRunId) state.groupRun = null;
   let t, vars, name;
   if (request.instanceId) {
     const instance = state.tasks.find(x => x.instanceId === request.instanceId);
-    ensure(instance, '任务不存在'); t = state.templates.find(x => x.templateId === instance.templateId); name = instance.name; vars = { ...instance.variables, taskName: name };
+    ensure(instance, '任务不存在'); t = state.templates.find(x => x.templateId === instance.templateId); ensure(t, '任务模板不存在'); name = instance.name; vars = { ...taskVariables(instance, t), taskName: name };
   } else {
     const matches = state.templates.filter(x => request.templateId ? x.templateId === request.templateId : x.groupName === request.templateGroup);
     ensure(matches.length === 1, '分组需要唯一模板；存在多个模板时请指定templateId');
@@ -85,12 +157,85 @@ async function beginRun(state, request, tabId) {
   const tab = await selectedTab(tabId);
   ensure(tab?.id && allowed(state, tab.url), '请在已授权的业务网页发起任务');
   ensure(new URL(tab.url).origin === new URL(t.startUrl).origin, '当前页面与模板起始页不同源');
-  const run = { id: crypto.randomUUID(), requestId: request.requestId ?? null, templateId: t.templateId, name, tabId: tab.id, status: 'running', index: 0, total: steps.length, startedAt: Date.now(), updatedAt: Date.now() };
+  const run = { id: crypto.randomUUID(), requestId: request.requestId ?? null, groupRunId: request.groupRunId || null, templateId: t.templateId, name, tabId: tab.id, status: 'running', index: 0, total: steps.length, startedAt: Date.now(), updatedAt: Date.now() };
   await chrome.storage.session.remove('runtimeClipboard');
   state.runs.unshift(run); state.runs = state.runs.slice(0, 100); state.activeRun = run.id;
   await put(state);
   void execute(run.id, tab.id, t.startUrl, steps, vars);
   return { runId: run.id };
+}
+async function runSingleStep(state, request) {
+  ensure(!state.activeRun && !state.recording, '请先结束当前执行或录制');
+  ensure(typeof request.templateId === 'string' && Number.isInteger(request.stepIndex), '步骤信息无效');
+  const source = state.templates.find(item => item.templateId === request.templateId);
+  ensure(source && request.stepIndex >= 0 && request.stepIndex < source.steps.length, '流程步骤不存在');
+  const taskInstance = state.tasks.find(item => item.instanceId === request.instanceId && item.templateId === source.templateId);
+  ensure(taskInstance, '请选择此流程关联的任务数据');
+  const tab = await selectedTab(request.tabId);
+  const origin = new URL(source.startUrl).origin;
+  ensure(tab?.id && allowed(state, tab.url) && new URL(tab.url).origin === origin, '请打开与流程起始页相同且已授权的业务页面');
+  const values = { ...taskVariables(taskInstance, source), taskName: taskInstance.name };
+  let step = resolveSingleStep(source, request.stepIndex, values);
+  await waitPage(tab.id);
+  const readyUrl = (await chrome.tabs.get(tab.id)).url;
+  ensure(allowed(state, readyUrl) && new URL(readyUrl).origin === origin, '页面已离开流程授权来源，单步试运行终止');
+  if (step.type === 'navigate') {
+    ensure(new URL(step.url).origin === origin, '单步试运行仅允许在流程授权来源内跳转');
+    await chrome.tabs.update(tab.id, { url: step.url });
+    return { message: '已执行页面跳转步骤' };
+  }
+  if (step.type === 'paste') {
+    let taskText = step.clipboardVariable ? values[step.clipboardVariable] : values.taskText || values.historyText;
+    if (!taskText) taskText = (await chrome.storage.session.get('runtimeClipboard')).runtimeClipboard;
+    ensure(typeof taskText === 'string' && taskText.length > 0, '任务正文为空，请先填写任务正文');
+    step = { ...step, clipboardText: taskText };
+  }
+  const result = await chrome.tabs.sendMessage(tab.id, { type: 'PLAY_STEP', step, runId: `single-step-${crypto.randomUUID()}` }, { frameId: 0 });
+  ensure(result?.ok, result?.error || '单步试运行失败');
+  return { message: '单步执行成功' };
+}
+async function beginGroupRun(state, request, tabId) {
+  ensure(!state.activeRun && !state.recording, '已有任务或录制正在进行');
+  const tasks = state.tasks.filter(task => state.templates.some(t => t.templateId === task.templateId && t.groupName === request.groupName));
+  ensure(tasks.length > 0, '这个分组没有任务');
+  const tab = await selectedTab(tabId);
+  ensure(tab?.id && allowed(state, tab.url), '请在已授权的业务网页发起任务');
+  const pageOrigin = new URL(tab.url).origin;
+  // Validate the entire group before the first page action, so a missing
+  // template or variable cannot leave a half-started batch.
+  for (const task of tasks) {
+    const template = state.templates.find(t => t.templateId === task.templateId);
+    ensure(template?.steps.length, `${task.name} 所属流程尚未录制`);
+    ensure(new URL(template.startUrl).origin === pageOrigin, `${task.name} 的流程与当前页面不同源`);
+    resolveSteps(template, { ...taskVariables(task, template), taskName: task.name });
+    if (template.steps.some(step => step.type === 'paste' && !step.disabled)) ensure((task.variables.taskText || task.variables.historyText || '').length > 0, `${task.name} 缺少任务正文`);
+  }
+  const id = crypto.randomUUID();
+  state.groupRun = { id, groupName: request.groupName, taskIds: tasks.map(task => task.instanceId), index: 0, status: 'running', tabId: tab.id, startedAt: Date.now() };
+  try { return await beginRun(state, { instanceId: tasks[0].instanceId, groupRunId: id }, tab.id); }
+  catch (error) { state.groupRun = null; throw error; }
+}
+async function advanceGroup(groupRunId, status, error) {
+  await exclusive(async () => {
+    const state = await get(); const groupRun = state.groupRun;
+    if (!groupRun || groupRun.id !== groupRunId || groupRun.status !== 'running') return;
+    if (status !== 'success') {
+      Object.assign(groupRun, { status: status === 'stopped' ? 'stopped' : 'failed', error, finishedAt: Date.now() });
+      await put(state); return;
+    }
+    groupRun.index++;
+    if (groupRun.index >= groupRun.taskIds.length) {
+      Object.assign(groupRun, { status: 'success', finishedAt: Date.now() });
+      await put(state); return;
+    }
+    const nextTask = state.tasks.find(task => task.instanceId === groupRun.taskIds[groupRun.index]);
+    await put(state);
+    try { await beginRun(state, { instanceId: nextTask.instanceId, groupRunId }, groupRun.tabId); }
+    catch (nextError) {
+      Object.assign(groupRun, { status: 'failed', error: nextError.message, finishedAt: Date.now() });
+      await put(state);
+    }
+  });
 }
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function waitPage(tabId) {
@@ -126,7 +271,7 @@ async function execute(id, tabId, startUrl, steps, vars) {
         // Do not retry an action after uncertain delivery: clicks may submit clinical data.
         let executableStep = step;
         if (step.type === 'paste') {
-          let taskText = vars.taskText || vars.historyText;
+          let taskText = step.clipboardVariable ? vars[step.clipboardVariable] : vars.taskText || vars.historyText;
           if (!taskText) taskText = (await chrome.storage.session.get('runtimeClipboard')).runtimeClipboard;
           ensure(typeof taskText === 'string' && taskText.length > 0, '任务正文为空；请在插件任务配置中填写正文，或先执行录制流程中的复制操作');
           executableStep = { ...step, clipboardText: taskText };
@@ -141,7 +286,9 @@ async function execute(id, tabId, startUrl, steps, vars) {
 }
 async function finish(id, status, error) {
   await chrome.storage.session.remove('runtimeClipboard');
-  await exclusive(async () => { const s = await get(); const r = s.runs.find(r => r.id === id); if (!r || s.activeRun !== id) return; Object.assign(r, { status, error, finishedAt: Date.now(), index: status === 'success' ? r.total : r.index }); s.activeRun = null; await put(s); });
+  let groupRunId = null;
+  await exclusive(async () => { const s = await get(); const r = s.runs.find(r => r.id === id); if (!r || s.activeRun !== id) return; groupRunId = r.groupRunId; Object.assign(r, { status, error, finishedAt: Date.now(), index: status === 'success' ? r.total : r.index }); s.activeRun = null; await put(s); });
+  if (groupRunId) await advanceGroup(groupRunId, status, error);
 }
 async function route(m, sender, external = false) {
   await initial;
@@ -179,8 +326,23 @@ async function route(m, sender, external = false) {
       return { recording: s.recording?.tabId === sender.tab?.id };
     }
     if (m.type === 'STATE') {
-      if (page) return { state: s, extensionId: chrome.runtime.id };
-      return { state: { templates: s.templates.map(t => ({ templateId: t.templateId, name: t.name, groupName: t.groupName })), tasks: s.tasks.map(({ variables, ...t }) => ({ ...t, variables: { searchWord: variables.searchWord || '', taskText: variables.taskText || variables.historyText || '' } })), recording: s.recording ? { tabId: s.recording.tabId, name: s.recording.name, count: s.recording.steps.length } : null, activeRun: s.activeRun, runs: s.runs.slice(0, 5).map(({ error, ...r }) => r) } };
+      if (page) return { state: s, extensionId: chrome.runtime.id, capabilities: { pasteBindings: true, explicitBindings: true } };
+      const active = s.runs.find(run => run.id === s.activeRun);
+      const groupRun = s.groupRun ? {
+        id: s.groupRun.id, groupName: s.groupRun.groupName, index: s.groupRun.index,
+        total: s.groupRun.taskIds.length, status: s.groupRun.status,
+        currentTaskName: s.tasks.find(task => task.instanceId === s.groupRun.taskIds[s.groupRun.index])?.name,
+        currentStep: active?.groupRunId === s.groupRun.id ? { index: active.index, total: active.total } : null,
+        error: s.groupRun.error,
+        tasks: s.groupRun.taskIds.map((instanceId, index) => {
+          const task = s.tasks.find(item => item.instanceId === instanceId);
+          const taskStatus = index < s.groupRun.index || s.groupRun.status === 'success' ? 'success'
+            : index === s.groupRun.index && s.groupRun.status === 'running' ? 'running'
+              : index === s.groupRun.index && ['failed', 'stopped'].includes(s.groupRun.status) ? s.groupRun.status : 'pending';
+          return { instanceId, name: task?.name || instanceId, status: taskStatus };
+        }),
+      } : null;
+      return { state: { templates: s.templates.map(t => ({ templateId: t.templateId, name: t.name, groupName: t.groupName })), tasks: s.tasks.map(({ variables, ...t }) => ({ ...t, variables: { searchWord: variables.searchWord || '', patientName: variables.patientName || '', patientId: variables.patientId || '', taskText: variables.taskText || variables.historyText || '' } })), recording: s.recording ? { tabId: s.recording.tabId, name: s.recording.name, count: s.recording.steps.length } : null, activeRun: s.activeRun, groupRun, runs: s.runs.slice(0, 5).map(({ error, ...r }) => r) } };
     }
     if (m.type === 'CAPTURE_CLIPBOARD') {
       ensure(content && allowed(sender.url) && typeof m.text === 'string' && m.text.length <= 4000, '复制内容无效或页面未授权');
@@ -188,7 +350,10 @@ async function route(m, sender, external = false) {
     }
     if (m.type === 'OPEN') return chrome.runtime.openOptionsPage();
     if (m.type === 'RUN') return beginRun(s, m, content ? sender.tab.id : m.tabId);
+    if (m.type === 'RUN_STEP') { ensure(page, '单步试运行仅允许从插件工作台发起'); return runSingleStep(s, m); }
+    if (m.type === 'RUN_GROUP') { ensure(!external && content, '一键分组运行仅允许从业务页扩展面板发起'); return beginGroupRun(s, m, sender.tab.id); }
     if (m.type === 'STOP') {
+      if (s.groupRun?.status === 'running') { Object.assign(s.groupRun, { status: 'stopped', finishedAt: Date.now() }); await put(s); }
       if (s.activeRun) { const r = s.runs.find(r => r.id === s.activeRun); r.status = 'stopped'; r.finishedAt = Date.now(); s.activeRun = null; await put(s); await chrome.tabs.sendMessage(r.tabId, { type: 'CANCEL' }, { frameId: 0 }).catch(() => {}); }
       return {};
     }
@@ -225,9 +390,10 @@ async function route(m, sender, external = false) {
         };
         const taskSearch = inputs.find(x => /task[-_ ]?(search|name)|任务/.test(x.step.selector));
         bind(taskSearch, 'taskName');
-        const patientSearch = inputs.find(x => /search[-_ ]?word|patient|directory[-_ ]?search|患者/.test(x.step.selector) && x !== taskSearch);
-        const firstFree = inputs.find(x => !/\{[A-Za-z_]\w*\}/.test(x.step.value));
-        bind(patientSearch || firstFree, 'searchWord');
+        for (const entry of inputs) {
+          const variable = patientVariableForSelector(entry.step.selector);
+          if (variable) bind(entry, variable);
+        }
         const t = template({ ...rec, steps, templateId: rec.templateId || crypto.randomUUID() });
         s.templates = [...s.templates.filter(x => x.templateId !== t.templateId), t];
       }
