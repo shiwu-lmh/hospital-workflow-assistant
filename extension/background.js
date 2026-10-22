@@ -1,4 +1,4 @@
-import { patientVariableForSelector, ensure, template, task, resolveSteps, resolveSingleStep, importData, seed, httpUrl, text, variables, MAX_STEPS, DEMO_TASK_BODY, DEMO_TASK_BODIES, LEGACY_DEMO_TASK_BODIES, PREVIOUS_DEMO_TASK_BODIES } from './core.js';
+import { patientVariableForSelector, ensure, template, task, resolveSteps, resolveSingleStep, importData, seed, httpUrl, text, variables, panelPreferences, MAX_STEPS, DEMO_TASK_BODY, DEMO_TASK_BODIES, LEGACY_DEMO_TASK_BODIES, PREVIOUS_DEMO_TASK_BODIES } from './core.js';
 
 // All mutations use one serialized writer; durable activeRun prevents concurrent runs.
 let tail = Promise.resolve();
@@ -110,7 +110,32 @@ const initial = exclusive(async () => {
   await put(state);
 });
 chrome.runtime.onInstalled.addListener(() => initial.catch(console.error));
-chrome.action.onClicked.addListener(() => chrome.runtime.openOptionsPage());
+let openingFloating;
+async function openFloating(tabId) {
+  if (openingFloating) return openingFloating;
+  openingFloating = (async () => {
+    const url = chrome.runtime.getURL('floating.html');
+    const existing = (await chrome.tabs.query({})).find(tab => tab.url?.split('?')[0] === url);
+    if (existing) { await chrome.windows.update(existing.windowId, { focused: true }); await chrome.tabs.update(existing.id, { active: true }); }
+    else await chrome.tabs.create({ url: `${url}?tabId=${tabId || ''}`, active: true, pinned: true });
+  })();
+  try { await openingFloating; } finally { openingFloating = null; }
+}
+async function floatingVisibility(open, controllerTabId = null) {
+  await chrome.storage.session.set({ globalFloatingOpen: open, floatingControllerTabId: controllerTabId });
+  const tabs = await chrome.tabs.query({});
+  await Promise.all(tabs.map(tab => chrome.tabs.sendMessage(tab.id, { type: 'FLOATING_VISIBILITY', open }, { frameId: 0 }).catch(() => {})));
+}
+chrome.action.onClicked.addListener(tab => openFloating(tab.id).catch(console.error));
+chrome.tabs.onRemoved.addListener(async tabId => {
+  const session = await chrome.storage.session.get('floatingControllerTabId');
+  if (session.floatingControllerTabId === tabId) await floatingVisibility(false);
+});
+chrome.tabs.onUpdated.addListener(async (tabId, change) => {
+  if (!change.url) return;
+  const session = await chrome.storage.session.get('floatingControllerTabId');
+  if (session.floatingControllerTabId === tabId && change.url.split('?')[0] !== chrome.runtime.getURL('floating.html')) await floatingVisibility(false);
+});
 chrome.alarms.create('watchdog', { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener(() => exclusive(async () => {
   const state = await get();
@@ -323,7 +348,12 @@ async function route(m, sender, external = false) {
         const rec = s.recording; ensure(new URL(sender.url).origin === new URL(rec.startUrl).origin, '录制已离开起始来源');
         if (rec.steps.length < MAX_STEPS && !rec.steps.at(-1)?.followNavigation) rec.steps.push({ type: 'navigate', url: sender.url }); rec.lastUrl = sender.url; await put(s);
       }
-      return { recording: s.recording?.tabId === sender.tab?.id };
+      return { recording: s.recording?.tabId === sender.tab?.id, globalFloatingOpen: (await chrome.storage.session.get('globalFloatingOpen')).globalFloatingOpen === true };
+    }
+    if (m.type === 'OPEN_FLOATING') { ensure(content, '请从业务页面打开悬浮窗'); await openFloating(sender.tab.id); return {}; }
+    if (m.type === 'FLOATING_STATUS') {
+      ensure(page && sender.url.split('?')[0] === chrome.runtime.getURL('floating.html'), '非法悬浮窗来源');
+      await floatingVisibility(m.open === true, m.open === true ? sender.tab?.id : null); return {};
     }
     if (m.type === 'STATE') {
       if (page) return { state: s, extensionId: chrome.runtime.id, capabilities: { pasteBindings: true, explicitBindings: true } };
@@ -342,7 +372,13 @@ async function route(m, sender, external = false) {
           return { instanceId, name: task?.name || instanceId, status: taskStatus };
         }),
       } : null;
-      return { state: { templates: s.templates.map(t => ({ templateId: t.templateId, name: t.name, groupName: t.groupName })), tasks: s.tasks.map(({ variables, ...t }) => ({ ...t, variables: { searchWord: variables.searchWord || '', patientName: variables.patientName || '', patientId: variables.patientId || '', taskText: variables.taskText || variables.historyText || '' } })), recording: s.recording ? { tabId: s.recording.tabId, name: s.recording.name, count: s.recording.steps.length } : null, activeRun: s.activeRun, groupRun, runs: s.runs.slice(0, 5).map(({ error, ...r }) => r) } };
+      return { state: { templates: s.templates.map(t => ({ templateId: t.templateId, name: t.name, groupName: t.groupName, startUrl: t.startUrl })), tasks: s.tasks.map(({ variables, ...t }) => ({ ...t, variables: { searchWord: variables.searchWord || '', patientName: variables.patientName || '', patientId: variables.patientId || '', taskText: variables.taskText || variables.historyText || '' } })), recording: s.recording ? { tabId: s.recording.tabId, name: s.recording.name, count: s.recording.steps.length } : null, activeRun: s.activeRun, groupRun, runs: s.runs.slice(0, 5).map(({ error, ...r }) => r) } };
+    }
+    if (m.type === 'GET_PANEL_PREFS') return { preferences: panelPreferences((await chrome.storage.local.get('panelPreferences')).panelPreferences) };
+    if (m.type === 'SET_PANEL_PREFS') {
+      const preferences = panelPreferences(m.preferences);
+      await chrome.storage.local.set({ panelPreferences: preferences });
+      return { preferences };
     }
     if (m.type === 'CAPTURE_CLIPBOARD') {
       ensure(content && allowed(sender.url) && typeof m.text === 'string' && m.text.length <= 4000, '复制内容无效或页面未授权');
@@ -351,7 +387,7 @@ async function route(m, sender, external = false) {
     if (m.type === 'OPEN') return chrome.runtime.openOptionsPage();
     if (m.type === 'RUN') return beginRun(s, m, content ? sender.tab.id : m.tabId);
     if (m.type === 'RUN_STEP') { ensure(page, '单步试运行仅允许从插件工作台发起'); return runSingleStep(s, m); }
-    if (m.type === 'RUN_GROUP') { ensure(!external && content, '一键分组运行仅允许从业务页扩展面板发起'); return beginGroupRun(s, m, sender.tab.id); }
+    if (m.type === 'RUN_GROUP') { ensure(content || (page && sender.url.split('?')[0] === chrome.runtime.getURL('floating.html')), '一键分组运行仅允许从流程助手面板发起'); return beginGroupRun(s, m, content ? sender.tab.id : m.tabId); }
     if (m.type === 'STOP') {
       if (s.groupRun?.status === 'running') { Object.assign(s.groupRun, { status: 'stopped', finishedAt: Date.now() }); await put(s); }
       if (s.activeRun) { const r = s.runs.find(r => r.id === s.activeRun); r.status = 'stopped'; r.finishedAt = Date.now(); s.activeRun = null; await put(s); await chrome.tabs.sendMessage(r.tabId, { type: 'CANCEL' }, { frameId: 0 }).catch(() => {}); }

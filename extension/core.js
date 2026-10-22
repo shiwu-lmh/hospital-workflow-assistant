@@ -75,6 +75,10 @@ export function variables(value) {
   }
   return result;
 }
+export function panelPreferences(value) {
+  const position = number => Number.isFinite(number) && number >= 0 && number <= 10000 ? number : null;
+  return { open: value?.open === true, left: position(value?.left), top: position(value?.top) };
+}
 export function interpolate(value, vars) {
   return value.replace(/\{([A-Za-z_]\w*)\}/g, (_, key) => {
     ensure(Object.hasOwn(vars, key), `缺少变量：${key}`);
@@ -102,6 +106,7 @@ export function template(value) {
       step.x = s.x; step.y = s.y;
     } else {
       step.selector = text(s.selector, '选择器', 2000);
+      if (s.type === 'wait' && s.expectedText != null) step.expectedText = text(s.expectedText, '成功标志文本', 4000);
       if (['input', 'select'].includes(s.type)) { ensure(typeof s.value === 'string' && s.value.length <= 4000, '输入值无效'); step.value = s.value; }
       if (s.type === 'check') { ensure(typeof s.checked === 'boolean', '勾选值无效'); step.checked = s.checked; }
       if (s.type === 'key') { ensure(['Enter', 'Tab', 'Escape'].includes(s.key), '不支持的按键'); step.key = s.key; }
@@ -145,7 +150,7 @@ export function describeStep(step) {
     check: `勾选${target || '复选框'}`,
     scroll: '滚动页面',
     navigate: '打开页面',
-    wait: `等待${target || '页面元素'}`,
+    wait: step.expectedText ? `核对成功标志：${step.expectedText}` : `等待${target || '页面元素'}`,
     key: `按下${{ Enter: '回车', Tab: 'Tab', Escape: 'Esc' }[step.key] || '按键'}`,
     paste: '粘贴任务正文',
   };

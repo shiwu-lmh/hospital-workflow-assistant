@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { seed, template, task, resolveSteps, importData, variables } from '../extension/core.js';
+import { seed, template, task, resolveSteps, importData, variables, panelPreferences } from '../extension/core.js';
 test('COD1/COD2 reuse the same immutable template', () => { const t = seed(true).templates[0]; assert.equal(resolveSteps(t, { searchWord: 'COD2' })[0].value, 'COD2'); assert.equal(t.steps[0].value, '{searchWord}'); });
 test('missing variables fail before running', () => assert.throws(() => resolveSteps(seed(true).templates[0], {}), /缺少变量/));
 test('variable payload cannot smuggle prototype keys', () => assert.throws(() => variables(JSON.parse('{"__proto__":"bad"}')), /变量名/));
@@ -18,3 +18,6 @@ test('COD sample tasks cover all twelve patients with distinct handling text', (
   assert.deepEqual(cod.map(item => item.name), Array.from({ length: 12 }, (_, i) => `COD${i + 1}`));
   assert.ok(cod.every(item => item.variables.taskText.includes('处理意见')));
 });
+
+test('wait checkpoint can require expected visible text', () => { const base = seed(true).templates[0]; const saved = template({ ...base, steps: [{ type: 'wait', selector: '#saved', expectedText: '保存成功', label: '确认保存结果' }] }); assert.equal(saved.steps[0].expectedText, '保存成功'); assert.throws(() => template({ ...base, steps: [{ type: 'wait', selector: '#saved', expectedText: 'x'.repeat(4001) }] }), /成功标志文本无效/); });
+test('floating panel preferences preserve open state and position safely', () => { assert.deepEqual(panelPreferences({ open: true, left: 42, top: 75 }), { open: true, left: 42, top: 75 }); assert.deepEqual(panelPreferences({ open: 'yes', left: -4, top: Infinity }), { open: false, left: null, top: null }); });

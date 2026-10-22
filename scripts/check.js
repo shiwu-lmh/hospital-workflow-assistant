@@ -7,5 +7,5 @@ for (const entry of await readdir('extension')) {
   const result = spawnSync(process.execPath, ['--check', `extension/${entry}`], { encoding: 'utf8' });
   if (result.status !== 0) throw new Error(result.stderr);
 }
-for (const path of [manifest.background.service_worker, manifest.options_page, ...manifest.content_scripts.flatMap(x => x.js)]) await readFile(`extension/${path}`);
+for (const path of [manifest.background.service_worker, manifest.options_page, 'floating.html', 'floating-ui.js', 'floating.js', 'floating.css', ...manifest.content_scripts.flatMap(x => x.js)]) await readFile(`extension/${path}`);
 console.log('Manifest、入口文件、JavaScript语法检查通过');

@@ -94,8 +94,10 @@
   });
   const finishDrag = event => {
     if (!dragState || dragState.pointerId !== event.pointerId) return;
-    suppressBadgeClick = dragState.moved; dragState = null; icon.classList.remove('dragging');
+    const moved = dragState.moved;
+    suppressBadgeClick = moved; dragState = null; icon.classList.remove('dragging');
     if (suppressBadgeClick) setTimeout(() => { suppressBadgeClick = false; }, 0);
+    if (moved) persistPanelPreferences().catch(() => {});
   };
   icon.addEventListener('pointerup', finishDrag);
   icon.addEventListener('pointercancel', finishDrag);
@@ -108,6 +110,10 @@
   const stopButton = el('button', '停止任务', tools), openButton = el('button', '工作台 ↗', tools);
   const status = el('div', '', body, 'status'); status.setAttribute('role', 'status');
   const showError = error => { status.textContent = error.message; status.classList.add('error'); status.scrollIntoView({ block: 'nearest' }); body.scrollTop = body.scrollHeight; };
+  const persistPanelPreferences = () => {
+    const rect = host.getBoundingClientRect();
+    return send({ type: 'SET_PANEL_PREFS', preferences: { open: !panel.hidden, left: Math.round(rect.left), top: Math.round(rect.top) } });
+  };
   function templateForGroup(state, groupName) {
     const candidates = state.templates.filter(t => t.groupName === groupName);
     if (candidates.length <= 1) return candidates[0] || null;
@@ -173,7 +179,14 @@
         const inspect = el('button', selectedTaskId === task.instanceId ? '正文 ✓' : '正文', row); inspect.onclick = () => { selectedTaskId = task.instanceId; refresh().catch(showError); };
         const copy = el('button', '复制', row); copy.disabled = !task.variables.taskText; copy.onclick = async () => { try { await navigator.clipboard.writeText(task.variables.taskText); status.textContent = `${task.name} 正文已复制`; status.classList.remove('error'); } catch { showError(new Error('复制失败，请检查浏览器剪贴板权限')); } };
         const run = el('button', '运行 →', row); run.disabled = !!state.activeRun || !!state.recording;
-        run.onclick = () => send({ type: 'RUN', instanceId: task.instanceId }).then(refresh).catch(showError);
+        run.onclick = () => {
+          const template = state.templates.find(item => item.templateId === task.templateId);
+          const patient = `${task.variables.patientName || task.variables.searchWord || '未配置'}${task.variables.patientId ? `（${task.variables.patientId}）` : ''}`;
+          const content = task.variables.taskText || task.variables.historyText || '无';
+          const review = `运行前请核对：\n任务：${task.name}\n患者标识：${patient}\n目标页面：${template?.startUrl || '未配置'}\n待填内容：\n${content}\n\n请确认业务页面患者身份一致、搜索结果唯一且目标字段正确。`;
+          if (!confirm(review)) return;
+          send({ type: 'RUN', instanceId: task.instanceId }).then(refresh).catch(showError);
+        };
       }
     }
     if (allTasks.length) {
@@ -190,8 +203,9 @@
     if (!status.classList.contains('error')) status.textContent = state.recording ? `正在录制 · 已捕获 ${state.recording.count} 步\n仅录制 HIS 页面操作；悬浮窗内的查看、复制和按钮操作不会录入模板。` : state.groupRun?.status === 'running' ? `${state.groupRun.groupName} 组运行中 ${Math.min(state.groupRun.index + 1, state.groupRun.total)}/${state.groupRun.total} · ${state.groupRun.currentTaskName || ''}` : state.activeRun ? '任务执行中…' : state.groupRun?.status === 'success' ? `${state.groupRun.groupName} 组已完成：${state.groupRun.total} 条任务` : state.groupRun?.status === 'failed' ? `${state.groupRun.groupName} 组中止：${state.groupRun.currentTaskName || ''} · ${state.groupRun.error || '任务失败'}` : state.groupRun?.status === 'stopped' ? `${state.groupRun.groupName} 组已停止` : state.runs[0] ? `最近执行：${state.runs[0].name} · ${state.runs[0].status}` : '全部数据保存在本机浏览器';
     return state;
   }
-  icon.onclick = () => { if (suppressBadgeClick) { suppressBadgeClick = false; return; } panel.hidden = !panel.hidden; icon.setAttribute('aria-expanded', String(!panel.hidden)); requestAnimationFrame(keepHostOnScreen); if (!panel.hidden) refresh().catch(showError); };
-  root.addEventListener('keydown', e => { if (e.key === 'Escape') { panel.hidden = true; icon.focus(); } });
+  icon.title = '打开浏览器全局置顶悬浮窗';
+  icon.onclick = () => { if (suppressBadgeClick) { suppressBadgeClick = false; return; } send({ type: 'OPEN_FLOATING' }).catch(showError); };
+  root.addEventListener('keydown', e => { if (e.key === 'Escape') { panel.hidden = true; icon.setAttribute('aria-expanded', 'false'); persistPanelPreferences().catch(() => {}); icon.focus(); } });
   openButton.onclick = () => send({ type: 'OPEN' }).catch(showError);
   stopButton.onclick = () => send({ type: 'STOP' }).then(refresh).catch(showError);
   recordButton.onclick = async () => { try { status.classList.remove('error'); const state = await refresh(); if (!state.recording || !state.recording.count) throw new Error('当前没有可保存的录制步骤'); recordButton.disabled = true; await sending; if (captureError) throw new Error(`有录制步骤未保存：${captureError}。请重新录制后再保存。`); const saved = await send({ type: 'RECORD_STOP' }); await refresh(); status.textContent = saved.boundVariable ? `${state.recording.groupName} 共用流程已保存并关联到本组任务；患者搜索变量已绑定。` : `${state.recording.groupName} 共用流程已保存。`; } catch (e) { showError(e); } finally { recordButton.disabled = false; } };
@@ -254,9 +268,12 @@
       const matches = document.querySelectorAll(s.selector);
       if (matches.length > 1) throw new Error('选择器匹配多个元素，请在工作台修正');
       const n = matches[0];
-      if (n && n.getClientRects().length && !n.disabled && getComputedStyle(n).visibility !== 'hidden') return n;
+      if (n && n.getClientRects().length && !n.disabled && getComputedStyle(n).visibility !== 'hidden') {
+        if (!s.expectedText || String(n.innerText || n.textContent || '').includes(s.expectedText)) return n;
+      }
       await new Promise(resolve => setTimeout(resolve, 100));
     } while (Date.now() < deadline);
+    if (s.expectedText) throw new Error(`成功标志未出现：${s.expectedText}`);
     throw new Error('等待元素超时，请检查选择器或页面状态');
   }
   async function play(s) {
@@ -266,7 +283,9 @@
     if (n.matches('input[type=password],input[type=file]')) throw new Error('不回放密码或文件字段');
     n.scrollIntoView({ block: 'center' });
     if (s.type === 'click') { setTimeout(() => { if (!signal.aborted) n.click(); }, 0); return; }
-    if (s.type === 'wait') return;
+    if (s.type === 'wait') {
+      return;
+    }
     n.focus();
     if (s.type === 'paste') {
       if (!(n instanceof HTMLInputElement || n instanceof HTMLTextAreaElement)) throw new Error('粘贴目标必须是文本输入框');
@@ -289,11 +308,19 @@
   chrome.runtime.onMessage.addListener((m, sender, reply) => {
     if (sender.id !== chrome.runtime.id) return;
     if (m.type === 'PING') reply({ ok: true });
+    else if (m.type === 'FLOATING_VISIBILITY') { panel.hidden = true; host.style.setProperty('display', m.open ? 'none' : 'block', 'important'); reply({ ok: true }); }
     else if (m.type === 'RECORDING') { recording = m.value; if (recording) captureError = null; icon.textContent = recording ? '● 正在录制' : '✚ 流程助手'; reply({ ok: true }); }
     else if (m.type === 'FLUSH_RECORDING') { sending.then(() => reply(captureError ? { ok: false, error: captureError } : { ok: true })).catch(e => reply({ ok: false, error: e.message })); return true; }
     else if (m.type === 'CANCEL') { controller?.abort(); reply({ ok: true }); }
     else if (m.type === 'PLAY_STEP') { play(m.step).then(() => reply({ ok: true })).catch(e => reply({ ok: false, error: e.message })); return true; }
   });
-  send({ type: 'READY' }).then(r => { recording = r.recording; if (recording) icon.textContent = '● 正在录制'; }).catch(() => {});
+  send({ type: 'READY' }).then(r => { recording = r.recording; if (recording) icon.textContent = '● 正在录制'; host.style.setProperty('display', r.globalFloatingOpen ? 'none' : 'block', 'important'); }).catch(() => {});
+  send({ type: 'GET_PANEL_PREFS' }).then(({ preferences }) => {
+    if (preferences.left !== null) { host.style.left = `${preferences.left}px`; host.style.right = 'auto'; }
+    if (preferences.top !== null) host.style.top = `${preferences.top}px`;
+    panel.hidden = true;
+    icon.setAttribute('aria-expanded', 'false');
+    keepHostOnScreen();
+  }).catch(() => {});
   setInterval(() => { if (!panel.hidden) refresh().catch(showError); }, 2000);
 })();

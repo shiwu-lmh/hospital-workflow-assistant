@@ -84,7 +84,13 @@ function renderTasks(parent) {
       el('p', `任务正文：${taskText ? `${taskText.slice(0, 90)}${taskText.length > 90 ? '…' : ''}` : needsTaskText ? '尚未配置' : '此流程无需正文'}`, card, 'task-text-preview');
       const actions = el('div', '', card, 'card-actions'); button(actions, '配置', () => edit('SAVE_TASK', task));
       if (taskText) button(actions, '复制正文', async () => { await navigator.clipboard.writeText(taskText); notice(`${task.name} 正文已复制，可手动粘贴；自动回放会直接使用本机任务正文。`); });
-      button(actions, '运行任务 →', async () => { const tabId = await targetTab(); await send({ type: 'RUN', instanceId: task.instanceId, tabId }); notice('已开始执行，可在执行记录查看结果'); await refresh(); }, 'primary').disabled = !template.steps.length || (needsTaskText && !taskText.trim()) || !!state.activeRun || !!state.recording;
+      button(actions, '运行任务 →', async () => {
+        const patient = `${task.variables.patientName || task.variables.searchWord || '未配置'}${task.variables.patientId ? `（${task.variables.patientId}）` : ''}`;
+        const body = taskText ? `\n\n待填内容：\n${taskText}` : '\n\n待填内容：无';
+        const review = `运行前请核对：\n任务：${task.name}\n患者标识：${patient}\n目标页面：${template.startUrl}${body}\n\n请确认业务页面显示的患者与标识一致，搜索结果唯一，且目标字段正确。确认后才会开始自动操作。`;
+        if (!confirm(review)) return;
+        const tabId = await targetTab(); await send({ type: 'RUN', instanceId: task.instanceId, tabId }); notice('已开始执行；请留意执行记录中的成功标志核验结果'); await refresh();
+      }, 'primary').disabled = !template.steps.length || (needsTaskText && !taskText.trim()) || !!state.activeRun || !!state.recording;
       button(actions, '删除', async () => { if (confirm(`删除任务 ${task.name}？`)) { await send({ type: 'DELETE_TASK', id: task.instanceId }); await refresh(); } });
     }
     if (!grid.children.length) el('div', '暂无任务，点击“新建任务”绑定此分组模板。', grid, 'empty');
@@ -197,6 +203,14 @@ function renderStepEditor(parent, source) {
     else if (step.disabled) el('span', '已停用', description, 'step-variable');
     if (step.selector) el('code', step.selector, description, 'step-selector');
     const controls = el('div', '', row, 'step-controls');
+    if (step.type === 'wait') button(controls, '配置成功标志', async () => {
+      const selector = prompt('成功标志元素的 CSS 选择器', step.selector);
+      if (selector == null) return;
+      const expectedText = prompt('该元素应包含的成功文本（留空则只检查元素出现且唯一）', step.expectedText || '');
+      if (expectedText == null) return;
+      const steps = source.steps.map((item, i) => i === index ? { ...item, selector: selector.trim(), ...(expectedText.trim() ? { expectedText: expectedText.trim() } : { expectedText: undefined }) } : item);
+      await saveStepTemplate({ ...source, steps });
+    }, 'step-trial');
     const up = button(controls, '上移', async () => saveStepTemplate(reorderStep(source, index, -1))); up.disabled = index === 0;
     const down = button(controls, '下移', async () => saveStepTemplate(reorderStep(source, index, 1))); down.disabled = index === source.steps.length - 1;
     const trial = button(controls, '单步试运行', async () => {
